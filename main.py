@@ -62,10 +62,11 @@ def check_system_requirements() -> bool:
         # Double check by running adb version
         try:
             result = subprocess.run(
-                ["adb", "version"], capture_output=True, text=True, timeout=10
+                ["adb", "version"], capture_output=True, text=True, timeout=10,
+                encoding="utf-8", errors="replace"
             )
             if result.returncode == 0:
-                version_line = result.stdout.strip().split("\n")[0]
+                version_line = (result.stdout or "").strip().split("\n")[0]
                 print(f"✅ OK ({version_line})")
             else:
                 print("❌ FAILED")
@@ -90,9 +91,10 @@ def check_system_requirements() -> bool:
     print("2. Checking connected devices...", end=" ")
     try:
         result = subprocess.run(
-            ["adb", "devices"], capture_output=True, text=True, timeout=10
+            ["adb", "devices"], capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace"
         )
-        lines = result.stdout.strip().split("\n")
+        lines = (result.stdout or "").strip().split("\n")
         # Filter out header and empty lines, look for 'device' status
         devices = [line for line in lines[1:] if line.strip() and "\tdevice" in line]
 
@@ -130,8 +132,10 @@ def check_system_requirements() -> bool:
             capture_output=True,
             text=True,
             timeout=10,
+            encoding="utf-8",
+            errors="replace",
         )
-        ime_list = result.stdout.strip()
+        ime_list = (result.stdout or "").strip()
 
         if "com.android.adbkeyboard/.AdbIME" in ime_list:
             print("✅ OK")

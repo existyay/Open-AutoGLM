@@ -1,0 +1,10 @@
+{
+  "mode": "api",
+  "api_key": "",
+  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "model": "autoglm-phone",
+  "local_model_path": "",
+  "local_port": 8000,
+  "lang": "cn",
+  "max_steps": 100
+}

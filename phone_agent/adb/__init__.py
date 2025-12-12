@@ -24,6 +24,14 @@ from phone_agent.adb.input import (
     type_text,
 )
 from phone_agent.adb.screenshot import get_screenshot
+from phone_agent.adb.utils import (
+    run_adb_command,
+    get_adb_prefix,
+    get_subprocess_flags,
+    get_adb_executable,
+    check_adb_available,
+    get_connected_devices,
+)
 
 __all__ = [
     # Screenshot
@@ -48,4 +56,11 @@ __all__ = [
     "ConnectionType",
     "quick_connect",
     "list_devices",
+    # Utils
+    "run_adb_command",
+    "get_adb_prefix",
+    "get_subprocess_flags",
+    "get_adb_executable",
+    "check_adb_available",
+    "get_connected_devices",
 ]

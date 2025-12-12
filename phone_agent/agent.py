@@ -1,6 +1,7 @@
 """Main PhoneAgent class for orchestrating phone automation."""
 
 import json
+import time
 import traceback
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -51,6 +52,7 @@ class PhoneAgent:
         agent_config: Configuration for the agent behavior.
         confirmation_callback: Optional callback for sensitive action confirmation.
         takeover_callback: Optional callback for takeover requests.
+        log_callback: Optional callback for detailed logging.
 
     Example:
         >>> from phone_agent import PhoneAgent
@@ -67,9 +69,12 @@ class PhoneAgent:
         agent_config: AgentConfig | None = None,
         confirmation_callback: Callable[[str], bool] | None = None,
         takeover_callback: Callable[[str], None] | None = None,
+        log_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ):
         self.model_config = model_config or ModelConfig()
         self.agent_config = agent_config or AgentConfig()
+        self.log_callback = log_callback
+        self._stopped = False
 
         self.model_client = ModelClient(self.model_config)
         self.action_handler = ActionHandler(
@@ -80,6 +85,18 @@ class PhoneAgent:
 
         self._context: list[dict[str, Any]] = []
         self._step_count = 0
+        
+    def _log(self, event_type: str, data: dict[str, Any] = None):
+        """发送日志事件到回调函数"""
+        if self.log_callback:
+            try:
+                self.log_callback(event_type, data or {})
+            except Exception:
+                pass  # 忽略回调错误
+                
+    def stop(self):
+        """停止Agent执行"""
+        self._stopped = True
 
     def run(self, task: str) -> str:
         """
@@ -93,18 +110,24 @@ class PhoneAgent:
         """
         self._context = []
         self._step_count = 0
+        self._stopped = False
 
         # First step with user prompt
         result = self._execute_step(task, is_first=True)
 
         if result.finished:
+            self._log("finish", {"message": result.message or "Task completed"})
             return result.message or "Task completed"
 
         # Continue until finished or max steps reached
         while self._step_count < self.agent_config.max_steps:
+            if self._stopped:
+                return "任务已停止"
+                
             result = self._execute_step(is_first=False)
 
             if result.finished:
+                self._log("finish", {"message": result.message or "Task completed"})
                 return result.message or "Task completed"
 
         return "Max steps reached"
@@ -138,10 +161,16 @@ class PhoneAgent:
     ) -> StepResult:
         """Execute a single step of the agent loop."""
         self._step_count += 1
+        
+        # 发送步骤开始日志
+        self._log("step_start", {"step": self._step_count})
 
         # Capture current screen state
+        self._log("screenshot", {})
         screenshot = get_screenshot(self.agent_config.device_id)
+        
         current_app = get_current_app(self.agent_config.device_id)
+        self._log("current_app", {"app": current_app})
 
         # Build messages
         if is_first:
@@ -169,10 +198,20 @@ class PhoneAgent:
 
         # Get model response
         try:
+            # 发送模型请求日志
+            self._log("model_request", {"model": self.model_config.model_name})
+            request_start = time.time()
+            
             response = self.model_client.request(self._context)
+            
+            # 发送模型响应日志
+            request_time = time.time() - request_start
+            self._log("model_response", {"time": request_time, "tokens": 0})
+            
         except Exception as e:
             if self.agent_config.verbose:
                 traceback.print_exc()
+            self._log("action_result", {"success": False, "message": str(e)})
             return StepResult(
                 success=False,
                 finished=True,
@@ -188,6 +227,12 @@ class PhoneAgent:
             if self.agent_config.verbose:
                 traceback.print_exc()
             action = finish(message=response.action)
+
+        # 发送思考过程日志
+        self._log("thinking", {"content": response.thinking})
+        
+        # 发送动作日志
+        self._log("action", {"action": action})
 
         if self.agent_config.verbose:
             # Print thinking process
@@ -209,9 +254,12 @@ class PhoneAgent:
             result = self.action_handler.execute(
                 action, screenshot.width, screenshot.height
             )
+            # 发送动作结果日志
+            self._log("action_result", {"success": result.success, "message": result.message or ""})
         except Exception as e:
             if self.agent_config.verbose:
                 traceback.print_exc()
+            self._log("action_result", {"success": False, "message": str(e)})
             result = self.action_handler.execute(
                 finish(message=str(e)), screenshot.width, screenshot.height
             )

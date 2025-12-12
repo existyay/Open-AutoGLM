@@ -1,8 +1,9 @@
 """Input utilities for Android device text input."""
 
 import base64
-import subprocess
 from typing import Optional
+
+from phone_agent.adb.utils import run_adb_command, get_adb_prefix
 
 
 def type_text(text: str, device_id: str | None = None) -> None:
@@ -17,12 +18,11 @@ def type_text(text: str, device_id: str | None = None) -> None:
         Requires ADB Keyboard to be installed on the device.
         See: https://github.com/nicnocquee/AdbKeyboard
     """
-    adb_prefix = _get_adb_prefix(device_id)
+    adb_prefix = get_adb_prefix(device_id)
     encoded_text = base64.b64encode(text.encode("utf-8")).decode("utf-8")
 
-    subprocess.run(
-        adb_prefix
-        + [
+    run_adb_command(
+        adb_prefix + [
             "shell",
             "am",
             "broadcast",
@@ -31,9 +31,7 @@ def type_text(text: str, device_id: str | None = None) -> None:
             "--es",
             "msg",
             encoded_text,
-        ],
-        capture_output=True,
-        text=True,
+        ]
     )
 
 
@@ -44,12 +42,10 @@ def clear_text(device_id: str | None = None) -> None:
     Args:
         device_id: Optional ADB device ID for multi-device setups.
     """
-    adb_prefix = _get_adb_prefix(device_id)
+    adb_prefix = get_adb_prefix(device_id)
 
-    subprocess.run(
-        adb_prefix + ["shell", "am", "broadcast", "-a", "ADB_CLEAR_TEXT"],
-        capture_output=True,
-        text=True,
+    run_adb_command(
+        adb_prefix + ["shell", "am", "broadcast", "-a", "ADB_CLEAR_TEXT"]
     )
 
 
@@ -63,22 +59,18 @@ def detect_and_set_adb_keyboard(device_id: str | None = None) -> str:
     Returns:
         The original keyboard IME identifier for later restoration.
     """
-    adb_prefix = _get_adb_prefix(device_id)
+    adb_prefix = get_adb_prefix(device_id)
 
     # Get current IME
-    result = subprocess.run(
-        adb_prefix + ["shell", "settings", "get", "secure", "default_input_method"],
-        capture_output=True,
-        text=True,
+    result = run_adb_command(
+        adb_prefix + ["shell", "settings", "get", "secure", "default_input_method"]
     )
-    current_ime = (result.stdout + result.stderr).strip()
+    current_ime = ((result.stdout or "") + (result.stderr or "")).strip()
 
     # Switch to ADB Keyboard if not already set
     if "com.android.adbkeyboard/.AdbIME" not in current_ime:
-        subprocess.run(
-            adb_prefix + ["shell", "ime", "set", "com.android.adbkeyboard/.AdbIME"],
-            capture_output=True,
-            text=True,
+        run_adb_command(
+            adb_prefix + ["shell", "ime", "set", "com.android.adbkeyboard/.AdbIME"]
         )
 
     # Warm up the keyboard
@@ -95,15 +87,8 @@ def restore_keyboard(ime: str, device_id: str | None = None) -> None:
         ime: The IME identifier to restore.
         device_id: Optional ADB device ID for multi-device setups.
     """
-    adb_prefix = _get_adb_prefix(device_id)
+    adb_prefix = get_adb_prefix(device_id)
 
-    subprocess.run(
-        adb_prefix + ["shell", "ime", "set", ime], capture_output=True, text=True
+    run_adb_command(
+        adb_prefix + ["shell", "ime", "set", ime]
     )
-
-
-def _get_adb_prefix(device_id: str | None) -> list:
-    """Get ADB command prefix with optional device specifier."""
-    if device_id:
-        return ["adb", "-s", device_id]
-    return ["adb"]
