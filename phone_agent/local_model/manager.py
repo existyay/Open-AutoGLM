@@ -120,8 +120,14 @@ class LocalModelManager:
             try:
                 __import__(pkg.split('[')[0])  # 处理 pkg[extras] 格式
             except ImportError:
-                result = subprocess.run([sys.executable, '-m', 'pip', 'install', pkg], capture_output=True)
-                if result.returncode != 0:
+                proc = subprocess.Popen(
+                    [sys.executable, '-m', 'pip', 'install', pkg, '-q'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                proc.wait(timeout=120)
+                if proc.returncode != 0:
                     return False
         return True
         
@@ -133,29 +139,60 @@ class LocalModelManager:
                 
             if not self.environment.system_info:
                 self.check_environment()
+            
+            print("📦 开始安装依赖...")
                 
             # 安装PyTorch
             if progress_callback:
                 progress_callback('安装PyTorch...', 0.1)
             
             torch_cmd = self.environment.get_torch_install_command()
-            if subprocess.run(torch_cmd.split(), capture_output=True).returncode != 0:
-                raise Exception("安装PyTorch失败")
+            print(f"📝 执行: {torch_cmd}")
+            proc = subprocess.Popen(
+                torch_cmd.split(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            stdout, stderr = proc.communicate(timeout=120)
+            if proc.returncode != 0:
+                error_msg = f"安装PyTorch失败: {stderr}"
+                print(f"❌ {error_msg}")
+                raise Exception(error_msg)
+            print("✅ PyTorch 安装成功")
                 
             # 安装其他依赖
             if progress_callback:
                 progress_callback('安装vLLM和其他依赖...', 0.5)
             
-            deps = ['vllm', 'transformers', 'accelerate', 'sentencepiece']
-            if not self._pip_install(deps):
-                raise Exception("安装依赖失败")
+            deps = ['vllm', 'transformers', 'accelerate', 'sentencepiece', 'requests']
+            for dep in deps:
+                print(f"📦 安装 {dep}...")
+                proc = subprocess.Popen(
+                    [sys.executable, '-m', 'pip', 'install', dep, '-q'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                stdout, stderr = proc.communicate(timeout=60)
+                if proc.returncode != 0:
+                    error_msg = f"安装{dep}失败: {stderr}"
+                    print(f"⚠️  {error_msg}")
+                    # 继续尝试安装其他依赖
+                else:
+                    print(f"✅ {dep} 安装成功")
                 
             if progress_callback:
                 progress_callback('安装完成', 1.0)
+            print("✅ 所有依赖安装完成")
             return True
             
         except Exception as e:
-            self._notify_status('install_error', {'error': str(e)})
+            error_msg = f'安装依赖失败: {str(e)}'
+            self._notify_status('install_error', {'error': error_msg})
+            print(f"❌ {error_msg}")
             return False
             
     def download_model(self, model_name: str = None,
@@ -186,34 +223,56 @@ class LocalModelManager:
     def start_server(self, model_name: str = None, port: int = 8000,
                      gpu_memory_utilization: float = 0.9) -> bool:
         """启动本地推理服务"""
-        model_name = model_name or self._config.get('last_model')
-        if not model_name:
-            self._notify_status('server_error', {'error': '未指定模型'})
-            return False
+        try:
+            model_name = model_name or self._config.get('last_model')
+            if not model_name:
+                error_msg = '未指定模型'
+                self._notify_status('server_error', {'error': error_msg})
+                print(f"❌ {error_msg}")
+                return False
+                
+            model_path = str(self.downloader.get_model_path(model_name))
+            if not self.downloader.is_model_downloaded(model_name):
+                error_msg = f'模型未下载: {model_name}'
+                self._notify_status('server_error', {'error': error_msg})
+                print(f"❌ {error_msg}")
+                return False
             
-        model_path = str(self.downloader.get_model_path(model_name))
-        if not self.downloader.is_model_downloaded(model_name):
-            self._notify_status('server_error', {'error': '模型未下载'})
-            return False
+            print(f"📝 即将启动服务: 模型={model_name}, 端口={port}, 模型路径={model_path}")
+            self._notify_status('server_starting', {'model': model_name, 'port': port})
             
-        self._notify_status('server_starting', {'model': model_name, 'port': port})
-        self.server = VLLMServerManager(model_path, port)
-        
-        if self.server.start(gpu_memory_utilization=gpu_memory_utilization):
-            self._config['server_port'] = port
-            self._save_config()
-            self._notify_status('server_started', {'model': model_name, 'port': port, 
-                               'api_base': self.server.get_api_base()})
-            return True
-        
-        self._notify_status('server_error', {'error': '服务启动失败'})
-        return False
+            self.server = VLLMServerManager(model_path, port)
+            
+            if self.server.start(gpu_memory_utilization=gpu_memory_utilization):
+                self._config['server_port'] = port
+                self._config['last_model'] = model_name
+                self._save_config()
+                api_base = self.server.get_api_base()
+                self._notify_status('server_started', {'model': model_name, 'port': port, 'api_base': api_base})
+                print(f"✅ 服务已启动: {api_base}")
+                return True
+            else:
+                error_msg = '服务启动失败'
+                self._notify_status('server_error', {'error': error_msg})
+                print(f"❌ {error_msg}")
+                return False
+                
+        except Exception as e:
+            error_msg = f'启动服务异常: {str(e)}'
+            self._notify_status('server_error', {'error': error_msg})
+            print(f"❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return False
         
     def stop_server(self):
         """停止推理服务"""
-        if self.server:
-            self.server.stop()
+        try:
+            if self.server:
+                self.server.stop()
             self._notify_status('server_stopped')
+        except Exception as e:
+            print(f"⚠️  停止服务时出错: {e}")
             
     def is_server_running(self) -> bool:
         return self.server is not None and self.server.is_running()

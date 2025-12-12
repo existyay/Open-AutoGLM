@@ -114,3 +114,6 @@ exe = EXE(
     entitlements_file=None,
     icon=None,  # 可以设置图标路径
 )
+
+# 注意: 打包为单个EXE文件而非目录
+# 这有助于防止多进程问题

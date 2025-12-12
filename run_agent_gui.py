@@ -411,9 +411,23 @@ class PhoneAgentGUI:
         model_frame.pack(fill=tk.X, pady=(10, 0))
         tk.Label(model_frame, text="本地模型", font=FONTS['bold'], fg=C['text'], bg=C['card']).pack(anchor=tk.W)
         
-        self.local_model_var = tk.StringVar(value="AutoGLM-Phone-9B-ModelScope")
-        ttk.Combobox(model_frame, textvariable=self.local_model_var, width=32, state='readonly',
-                    values=["AutoGLM-Phone-9B-ModelScope", "AutoGLM-Phone-9B", "AutoGLM-Phone-9B-Multilingual"]).pack(fill=tk.X, pady=(5, 0))
+        # 模型选择行
+        model_select_frame = tk.Frame(model_frame, bg=C['card'])
+        model_select_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        self.local_model_var = tk.StringVar(value="AutoGLM-Phone-9B")
+        self.model_combo = ttk.Combobox(model_select_frame, textvariable=self.local_model_var, width=28,
+                    values=["AutoGLM-Phone-9B", "📁 选择本地模型..."])
+        self.model_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.model_combo.bind('<<ComboboxSelected>>', self._on_model_selected)
+        
+        # 自定义模型路径（默认隐藏）
+        self.custom_model_frame = tk.Frame(model_frame, bg=C['card'])
+        self.custom_model_path = tk.StringVar()
+        tk.Label(self.custom_model_frame, text="模型路径:", font=FONTS['small'], fg=C['text2'], bg=C['card']).pack(side=tk.LEFT)
+        self.custom_model_entry = ttk.Entry(self.custom_model_frame, textvariable=self.custom_model_path, width=25)
+        self.custom_model_entry.pack(side=tk.LEFT, padx=(5, 5), fill=tk.X, expand=True)
+        AnimatedButton(self.custom_model_frame, "📂", self._browse_model_folder, C['accent2'], C['accent'], width=30, height=24).pack(side=tk.LEFT)
         
         # 下载进度
         self.download_progress_frame = tk.Frame(model_frame, bg=C['card'])
@@ -452,6 +466,18 @@ class PhoneAgentGUI:
                 lines = [f"🖥️ 系统: {info.os_name}", f"🐍 Python: {info.python_version}",
                         f"💾 内存: {info.ram_total / 1024:.1f} GB"]
                 
+                # Git 环境检测
+                if info.git_info:
+                    if info.git_info.git_available:
+                        git_status = f"✅ Git: {info.git_info.git_version or '已安装'}"
+                        if info.git_info.lfs_available:
+                            git_status += f" | LFS: {info.git_info.lfs_version or '已安装'}"
+                        else:
+                            git_status += " | ❌ LFS未安装"
+                        lines.append(git_status)
+                    else:
+                        lines.append("❌ Git: 未安装 (需要安装Git和Git LFS)")
+                
                 if info.cuda_available:
                     lines.append(f"🎮 CUDA: {info.cuda_version or '可用'}")
                     lines.extend(f"🖼️ GPU: {gpu.name} ({gpu.memory_total / 1024:.1f}GB)" for gpu in info.gpus)
@@ -460,13 +486,46 @@ class PhoneAgentGUI:
                     
                 lines.extend([f"💡 推荐: {info.recommended_model}", f"   {info.reason}"])
                 
-                color = COLORS['success'] if info.can_run_local else COLORS['warn']
+                # 根据环境状态设置颜色
+                can_download = info.git_info and info.git_info.git_available and info.git_info.lfs_available
+                color = COLORS['success'] if (info.can_run_local and can_download) else COLORS['warn']
                 self.root.after(0, lambda: self.env_status_label.configure(text="\n".join(lines), fg=color))
             except Exception as e:
                 self.root.after(0, lambda: self.env_status_label.configure(text=f"❌ 检测失败: {e}", fg=COLORS['error']))
                 
         self.env_status_label.configure(text="🔄 正在检测环境...", fg=COLORS['warn'])
         threading.Thread(target=check, daemon=True).start()
+    
+    def _on_model_selected(self, event=None):
+        """模型选择变化时的处理"""
+        selection = self.local_model_var.get()
+        if selection == "📁 选择本地模型...":
+            self.custom_model_frame.pack(fill=tk.X, pady=(5, 0))
+            self.download_btn.configure(state=tk.DISABLED)
+        else:
+            self.custom_model_frame.pack_forget()
+            self.download_btn.configure(state=tk.NORMAL)
+    
+    def _browse_model_folder(self):
+        """浏览并选择本地模型文件夹"""
+        from tkinter import filedialog
+        folder = filedialog.askdirectory(title="选择模型文件夹")
+        if folder:
+            self.custom_model_path.set(folder)
+            # 验证是否是有效的模型目录
+            model_path = Path(folder)
+            config_file = model_path / "config.json"
+            if config_file.exists():
+                self.server_status_label.configure(text=f"✅ 已选择模型: {model_path.name}", fg=COLORS['success'])
+            else:
+                self.server_status_label.configure(text="⚠️ 未找到config.json，可能不是有效的模型目录", fg=COLORS['warn'])
+    
+    def _get_model_path(self):
+        """获取当前选择的模型路径"""
+        selection = self.local_model_var.get()
+        if selection == "📁 选择本地模型...":
+            return self.custom_model_path.get()
+        return selection
         
     def download_model(self):
         """下载模型"""
@@ -511,7 +570,13 @@ class PhoneAgentGUI:
         
     def start_local_server(self):
         """启动本地推理服务"""
-        model_name, port = self.local_model_var.get(), int(self.local_port_var.get())
+        model_path = self._get_model_path()
+        port = int(self.local_port_var.get())
+        
+        # 检查是否选择了自定义模型路径
+        if self.local_model_var.get() == "📁 选择本地模型..." and not model_path:
+            messagebox.showwarning("提示", "请先选择模型文件夹")
+            return
         
         def start():
             try:
@@ -521,7 +586,7 @@ class PhoneAgentGUI:
                 self.root.after(0, lambda: (self.server_status_label.configure(text="🟡 正在启动服务...", fg=COLORS['warn']),
                                             self.start_server_btn.configure(state=tk.DISABLED)))
                 
-                if self.local_model_manager.start_server(model_name, port):
+                if self.local_model_manager.start_server(model_path, port):
                     api_base = self.local_model_manager.get_api_base()
                     self.root.after(0, lambda: (self.server_status_label.configure(text=f"🟢 服务运行中: {api_base}", fg=COLORS['success']),
                                                 self.stop_server_btn.configure(state=tk.NORMAL)))
@@ -726,12 +791,29 @@ class PhoneAgentGUI:
 
 
 def main():
+    """主程序入口 - 确保单实例运行"""
+    import multiprocessing
+    
+    # 关键：PyInstaller打包后必须调用freeze_support防止多窗口
+    if hasattr(sys, 'frozen'):
+        multiprocessing.freeze_support()
+        # 设置multiprocessing的启动方式为spawn（Windows默认）
+        try:
+            multiprocessing.set_start_method('spawn', force=True)
+        except RuntimeError:
+            pass
+    
     root = tk.Tk()
+    root.protocol("WM_DELETE_WINDOW", lambda: root.quit())
+    
     try:
-        root.iconbitmap(APP_DIR / "icon.ico")
+        icon_path = APP_DIR / "icon.ico"
+        if icon_path.exists():
+            root.iconbitmap(icon_path)
     except Exception:
         pass
-    PhoneAgentGUI(root)
+    
+    gui = PhoneAgentGUI(root)
     root.mainloop()
 
 

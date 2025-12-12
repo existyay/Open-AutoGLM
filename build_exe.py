@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Phone Agent 打包脚本
 使用PyInstaller将应用打包成独立EXE文件（包含ADB工具）
@@ -9,6 +10,13 @@ import sys
 import subprocess
 import shutil
 from pathlib import Path
+
+# 设置Windows控制台为UTF-8编码
+if sys.platform == 'win32':
+    os.system('chcp 65001 >nul 2>&1')
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # 项目根目录
 ROOT_DIR = Path(__file__).parent
@@ -177,6 +185,9 @@ exe = EXE(
     entitlements_file=None,
     icon=None,  # 可以设置图标路径
 )
+
+# 注意: 打包为单个EXE文件而非目录
+# 这有助于防止多进程问题
 '''
     
     spec_path = ROOT_DIR / "PhoneAgent.spec"

@@ -22,6 +22,15 @@ class GPUInfo:
 
 
 @dataclass
+class GitInfo:
+    """Git环境信息"""
+    git_available: bool
+    git_version: Optional[str] = None
+    lfs_available: bool = False
+    lfs_version: Optional[str] = None
+
+
+@dataclass
 class SystemInfo:
     """系统环境信息"""
     os_name: str
@@ -37,6 +46,7 @@ class SystemInfo:
     can_run_local: bool
     reason: str
     cudnn_version: Optional[str] = None
+    git_info: Optional[GitInfo] = None
 
 
 class EnvironmentDetector:
@@ -52,6 +62,7 @@ class EnvironmentDetector:
         
         cuda_available, cuda_version, gpus = self._detect_gpu_environment()
         ram_total = self._get_ram_total()
+        git_info = self._detect_git_environment()
         
         model, quant, can_run, reason = self._get_recommendation(cuda_available, gpus, ram_total)
         
@@ -60,9 +71,61 @@ class EnvironmentDetector:
             cpu_cores=os.cpu_count() or 1, ram_total=ram_total,
             cuda_available=cuda_available, cuda_version=cuda_version, gpus=gpus,
             recommended_model=model, recommended_quantization=quant,
-            can_run_local=can_run, reason=reason
+            can_run_local=can_run, reason=reason,
+            git_info=git_info
         )
         return self.system_info
+    
+    def _detect_git_environment(self) -> GitInfo:
+        """检测Git和Git LFS环境"""
+        git_available = False
+        git_version = None
+        lfs_available = False
+        lfs_version = None
+        
+        try:
+            # 检测 git
+            result = subprocess.run(
+                ['git', '--version'],
+                capture_output=True, text=True, timeout=5, **_SUBPROCESS_FLAGS
+            )
+            if result.returncode == 0:
+                git_available = True
+                # 解析版本号，例如 "git version 2.42.0.windows.1"
+                version_text = result.stdout.strip()
+                if 'version' in version_text:
+                    git_version = version_text.split('version')[1].strip().split()[0]
+                print(f"✅ Git: {git_version}")
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            print("⚠️  Git 未安装")
+        except Exception as e:
+            print(f"⚠️  Git 检测异常: {e}")
+        
+        if git_available:
+            try:
+                # 检测 git-lfs
+                result = subprocess.run(
+                    ['git', 'lfs', 'version'],
+                    capture_output=True, text=True, timeout=5, **_SUBPROCESS_FLAGS
+                )
+                if result.returncode == 0:
+                    lfs_available = True
+                    # 解析版本号，例如 "git-lfs/3.4.0 (GitHub; windows amd64; go 1.21.1)"
+                    version_text = result.stdout.strip()
+                    if '/' in version_text:
+                        lfs_version = version_text.split('/')[1].split()[0]
+                    print(f"✅ Git LFS: {lfs_version}")
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                print("⚠️  Git LFS 未安装")
+            except Exception as e:
+                print(f"⚠️  Git LFS 检测异常: {e}")
+        
+        return GitInfo(
+            git_available=git_available,
+            git_version=git_version,
+            lfs_available=lfs_available,
+            lfs_version=lfs_version
+        )
         
     def _get_ram_total(self) -> int:
         """获取系统总内存(MB)"""
@@ -108,19 +171,29 @@ class EnvironmentDetector:
                     if line.strip():
                         parts = [p.strip() for p in line.split(',')]
                         if len(parts) >= 4:
-                            gpus.append(GPUInfo(
-                                name=parts[0], memory_total=int(float(parts[1])),
-                                memory_free=int(float(parts[2])), driver_version=parts[3]
-                            ))
+                            try:
+                                gpus.append(GPUInfo(
+                                    name=parts[0], memory_total=int(float(parts[1])),
+                                    memory_free=int(float(parts[2])), driver_version=parts[3]
+                                ))
+                            except (ValueError, IndexError):
+                                pass
                 
                 result2 = subprocess.run(['nvidia-smi'], capture_output=True, text=True, 
                                         timeout=10, **_SUBPROCESS_FLAGS)
                 if result2.returncode == 0:
                     for line in result2.stdout.split('\n'):
                         if 'CUDA Version' in line:
-                            cuda_version = line.split('CUDA Version:')[1].split()[0].strip()
+                            try:
+                                cuda_version = line.split('CUDA Version:')[1].split()[0].strip()
+                            except (IndexError, ValueError):
+                                pass
                             break
-        except Exception:
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+            print(f"⚠️  nvidia-smi 检测失败: {e}")
+            pass
+        except Exception as e:
+            print(f"⚠️  GPU 检测异常: {e}")
             pass
             
         if not gpus:
@@ -136,6 +209,10 @@ class EnvironmentDetector:
                             compute_capability=f"{props.major}.{props.minor}"
                         ))
             except ImportError:
+                print("⚠️  PyTorch 未安装，无法检测CUDA")
+                pass
+            except Exception as e:
+                print(f"⚠️  PyTorch GPU 检测异常: {e}")
                 pass
                 
         return bool(gpus), cuda_version, gpus

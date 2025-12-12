@@ -9,6 +9,7 @@ import json
 import hashlib
 import threading
 import time
+import subprocess
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, Callable, Dict, Any, List
@@ -80,36 +81,21 @@ class DownloadProgress:
 class ModelDownloader:
     """模型下载器"""
     
-    # 预定义模型列表
+    # 预定义模型列表 - 仅使用ModelScope源
     AVAILABLE_MODELS = {
         'AutoGLM-Phone-9B': ModelInfo(
-            name='AutoGLM-Phone-9B',
-            repo_id='zai-org/AutoGLM-Phone-9B',
-            source='huggingface',
-            size_gb=18.0,
-            files=[],  # 将动态获取
-            quantization='fp16',
-            description='官方完整模型 (FP16精度，需要16GB+显存)'
-        ),
-        'AutoGLM-Phone-9B-Multilingual': ModelInfo(
-            name='AutoGLM-Phone-9B-Multilingual',
-            repo_id='zai-org/AutoGLM-Phone-9B-Multilingual',
-            source='huggingface',
-            size_gb=18.0,
-            files=[],
-            quantization='fp16',
-            description='官方多语言模型 (FP16精度，需要16GB+显存)'
-        ),
-        'AutoGLM-Phone-9B-ModelScope': ModelInfo(
             name='AutoGLM-Phone-9B',
             repo_id='ZhipuAI/AutoGLM-Phone-9B',
             source='modelscope',
             size_gb=18.0,
             files=[],
             quantization='fp16',
-            description='官方完整模型 (ModelScope源，国内推荐)'
+            description='官方完整模型 (FP16精度，需要16GB+显存)'
         ),
     }
+    
+    # ModelScope Git Clone URL
+    MODELSCOPE_GIT_URL = "https://www.modelscope.cn/ZhipuAI/AutoGLM-Phone-9B.git"
     
     def __init__(self, model_dir: Optional[str] = None):
         """
@@ -172,7 +158,7 @@ class ModelDownloader:
         Args:
             model_name: 模型名称（从AVAILABLE_MODELS中选择）
             progress_callback: 进度回调函数
-            use_mirror: 是否使用镜像源（国内加速）
+            use_mirror: 是否使用镜像源（已弃用，统一使用ModelScope）
             
         Returns:
             是否下载成功
@@ -185,22 +171,15 @@ class ModelDownloader:
             self.progress.error_message = f"未知模型: {model_name}"
             return False
             
-        model_info = self.AVAILABLE_MODELS[model_name]
         model_path = self.get_model_path(model_name)
         
         try:
             self.progress.status = "downloading"
-            self.progress.current_file = "准备下载..."
+            self.progress.current_file = "准备使用 Git LFS 下载..."
             self._notify_progress()
             
-            if model_info.source == 'huggingface':
-                success = self._download_from_huggingface(
-                    model_info.repo_id, model_path, use_mirror
-                )
-            else:
-                success = self._download_from_modelscope(
-                    model_info.repo_id, model_path
-                )
+            # 统一使用 git clone 从 ModelScope 下载
+            success = self._download_via_git_clone(model_path)
                 
             if success:
                 self.progress.status = "completed"
@@ -212,6 +191,108 @@ class ModelDownloader:
         except Exception as e:
             self.progress.status = "error"
             self.progress.error_message = str(e)
+            self._notify_progress()
+            return False
+    
+    def _download_via_git_clone(self, save_path: Path) -> bool:
+        """使用 git clone 从 ModelScope 下载模型"""
+        import shutil
+        
+        # 检查 git 和 git-lfs 是否可用
+        try:
+            result = subprocess.run(
+                ['git', '--version'],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            if result.returncode != 0:
+                self.progress.status = "error"
+                self.progress.error_message = "Git 未安装，请先安装 Git"
+                self._notify_progress()
+                return False
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            self.progress.status = "error"
+            self.progress.error_message = "Git 未安装，请先安装 Git: https://git-scm.com/downloads"
+            self._notify_progress()
+            return False
+        
+        # 检查 git-lfs
+        try:
+            result = subprocess.run(
+                ['git', 'lfs', 'version'],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            if result.returncode != 0:
+                self.progress.status = "error"
+                self.progress.error_message = "Git LFS 未安装，请先安装: git lfs install"
+                self._notify_progress()
+                return False
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            self.progress.status = "error"
+            self.progress.error_message = "Git LFS 未安装，请运行: git lfs install"
+            self._notify_progress()
+            return False
+        
+        # 如果目标目录已存在，先删除
+        if save_path.exists():
+            try:
+                shutil.rmtree(save_path)
+            except Exception as e:
+                self.progress.status = "error"
+                self.progress.error_message = f"无法删除旧目录: {e}"
+                self._notify_progress()
+                return False
+        
+        # 确保父目录存在
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        self.progress.current_file = f"正在从 ModelScope 克隆模型 (约18GB)..."
+        self._notify_progress()
+        print(f"📥 执行: git clone {self.MODELSCOPE_GIT_URL}")
+        
+        try:
+            # 使用 git clone 下载
+            process = subprocess.Popen(
+                ['git', 'clone', self.MODELSCOPE_GIT_URL, str(save_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+                cwd=str(save_path.parent)
+            )
+            
+            # 实时读取输出
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    line = line.strip()
+                    if line:
+                        # 解析 git 进度信息
+                        if 'Receiving objects:' in line or 'Resolving deltas:' in line:
+                            self.progress.current_file = line
+                            self._notify_progress()
+                        elif '%' in line:
+                            self.progress.current_file = line
+                            self._notify_progress()
+                        print(line)
+            
+            if process.returncode == 0:
+                self.progress.current_file = "✅ 模型下载完成!"
+                self._notify_progress()
+                print("✅ Git clone 成功")
+                return True
+            else:
+                self.progress.status = "error"
+                self.progress.error_message = f"Git clone 失败，返回码: {process.returncode}"
+                self._notify_progress()
+                return False
+                
+        except Exception as e:
+            self.progress.status = "error"
+            self.progress.error_message = f"Git clone 异常: {str(e)}"
             self._notify_progress()
             return False
             
@@ -239,84 +320,6 @@ class ModelDownloader:
                 self._progress_callback(self.progress)
             except Exception:
                 pass
-                
-    def _download_from_huggingface(self, repo_id: str, save_path: Path, 
-                                    use_mirror: bool = True) -> bool:
-        """从HuggingFace下载模型"""
-        try:
-            # 尝试使用 huggingface_hub
-            from huggingface_hub import snapshot_download, hf_hub_download
-            
-            # 设置镜像
-            if use_mirror:
-                os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-                
-            self.progress.current_file = f"下载模型: {repo_id}"
-            self._notify_progress()
-            
-            # 使用 snapshot_download 下载整个仓库
-            snapshot_download(
-                repo_id=repo_id,
-                local_dir=str(save_path),
-                local_dir_use_symlinks=False,
-                resume_download=True,
-            )
-            
-            return True
-            
-        except ImportError:
-            self.progress.current_file = "正在安装 huggingface_hub..."
-            self._notify_progress()
-            
-            # 安装 huggingface_hub
-            import subprocess
-            subprocess.run(
-                [sys.executable, '-m', 'pip', 'install', 'huggingface_hub'],
-                capture_output=True
-            )
-            
-            # 重试
-            return self._download_from_huggingface(repo_id, save_path, use_mirror)
-            
-        except Exception as e:
-            self.progress.status = "error"
-            self.progress.error_message = f"HuggingFace下载失败: {str(e)}"
-            self._notify_progress()
-            return False
-            
-    def _download_from_modelscope(self, repo_id: str, save_path: Path) -> bool:
-        """从ModelScope下载模型"""
-        try:
-            from modelscope import snapshot_download
-            
-            self.progress.current_file = f"下载模型: {repo_id}"
-            self._notify_progress()
-            
-            snapshot_download(
-                repo_id,
-                cache_dir=str(save_path.parent),
-                local_dir=str(save_path),
-            )
-            
-            return True
-            
-        except ImportError:
-            self.progress.current_file = "正在安装 modelscope..."
-            self._notify_progress()
-            
-            import subprocess
-            subprocess.run(
-                [sys.executable, '-m', 'pip', 'install', 'modelscope'],
-                capture_output=True
-            )
-            
-            return self._download_from_modelscope(repo_id, save_path)
-            
-        except Exception as e:
-            self.progress.status = "error"
-            self.progress.error_message = f"ModelScope下载失败: {str(e)}"
-            self._notify_progress()
-            return False
             
     def delete_model(self, model_name: str) -> bool:
         """删除已下载的模型"""
@@ -352,12 +355,19 @@ class VLLMServerManager:
         self.port = port
         self.process: Optional[object] = None
         self._is_running = False
+        self._startup_timeout = 30  # 启动超时时间（秒）
         
     def start(self, gpu_memory_utilization: float = 0.9,
               max_model_len: int = 8192) -> bool:
         """启动vLLM服务"""
         try:
             import subprocess
+            import requests
+            
+            # 检查模型路径是否存在
+            if not Path(self.model_path).exists():
+                print(f"❌ 模型路径不存在: {self.model_path}")
+                return False
             
             cmd = [
                 sys.executable, '-m', 'vllm.entrypoints.openai.api_server',
@@ -368,39 +378,99 @@ class VLLMServerManager:
                 '--trust-remote-code',
             ]
             
+            print(f"📝 启动命令: {' '.join(cmd)}")
+            
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
             
-            # 等待服务启动
-            time.sleep(10)
+            print(f"⏳ 等待vLLM服务启动 (最多{self._startup_timeout}秒)...")
             
-            if self.process.poll() is None:
-                self._is_running = True
-                return True
-            else:
+            # 检查进程是否立即崩溃
+            time.sleep(2)
+            if self.process.poll() is not None:
+                stderr = self.process.stderr.read() if self.process.stderr else ""
+                stdout = self.process.stdout.read() if self.process.stdout else ""
+                error_msg = f"进程立即退出\nSTDOUT: {stdout}\nSTDERR: {stderr}"
+                print(f"❌ {error_msg}")
                 return False
+            
+            # 轮询检查服务是否启动
+            for attempt in range(self._startup_timeout):
+                try:
+                    response = requests.get(f"http://localhost:{self.port}/v1/models", timeout=2)
+                    if response.status_code == 200:
+                        print(f"✅ vLLM服务已启动 (耗时{attempt}秒)")
+                        self._is_running = True
+                        return True
+                except Exception:
+                    pass
                 
+                time.sleep(1)
+                
+                # 再次检查进程是否还在运行
+                if self.process.poll() is not None:
+                    stderr = self.process.stderr.read() if self.process.stderr else ""
+                    stdout = self.process.stdout.read() if self.process.stdout else ""
+                    error_msg = f"启动过程中进程退出\nSTDOUT: {stdout}\nSTDERR: {stderr}"
+                    print(f"❌ {error_msg}")
+                    return False
+            
+            print(f"❌ 启动超时({self._startup_timeout}秒)，服务未响应")
+            self.stop()
+            return False
+                
+        except ImportError as e:
+            print(f"❌ 缺少依赖: {e}")
+            print("请安装: pip install vllm requests")
+            return False
         except Exception as e:
-            print(f"启动vLLM服务失败: {e}")
+            print(f"❌ 启动vLLM服务失败: {e}")
+            import traceback
+            traceback.print_exc()
             return False
             
     def stop(self):
         """停止vLLM服务"""
         if self.process:
-            self.process.terminate()
-            self.process.wait(timeout=10)
-            self.process = None
+            try:
+                if self.process.poll() is None:  # 进程仍在运行
+                    self.process.terminate()
+                    try:
+                        self.process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        print("⚠️  进程未在规定时间内停止，强制杀死...")
+                        self.process.kill()
+                        self.process.wait()
+            except Exception as e:
+                print(f"⚠️  停止进程时出错: {e}")
+            finally:
+                self.process = None
         self._is_running = False
+        print("✅ vLLM服务已停止")
         
     def is_running(self) -> bool:
         """检查服务是否运行中"""
         if self.process is None:
             return False
-        return self.process.poll() is None
+        
+        # 检查进程是否仍在运行
+        poll_result = self.process.poll()
+        if poll_result is not None:
+            self._is_running = False
+            return False
+        
+        # 尝试ping API检查是否真正可用
+        try:
+            import requests
+            response = requests.get(f"http://localhost:{self.port}/v1/models", timeout=2)
+            return response.status_code == 200
+        except Exception:
+            return False
         
     def get_api_base(self) -> str:
         """获取API基础URL"""
